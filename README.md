@@ -11,7 +11,25 @@ We implement GraphView in C#, which is an open source project published on [Gith
 
 We divide a Gremlin query into three parts, including translation, compilation, execution. And if SQL-like language is used,  the latter two parts will enough.
 
-*Semantics always comes first. They define the problem.*
+*Semantics always come first. They define the problem.*
+
+## Dependency
+
+GraphView needs Microsoft.SqlServer.TransactSql.ScriptDom.dll. Download and install [SQL Server Data Tools](17).
+
+## Build
+
+### Prerequisites
+
+- Visual Studio, programming languages -> Visual C# -> Common Tools for Visual C#
+- Install SQL Server Data Tools
+
+### Build
+
+- Clone the source code: git clone https://github.com/Microsoft/GraphView.git
+- Open GraphView.csproj
+- Set the configuration to "release"
+- Build the project and generate GraphView.dll
 
 ## Main processes
 
@@ -59,13 +77,33 @@ WHERE
 
 As you can see, there is some differences between this SQL-like script and the standard SQL query. But now we just ignore these differences for the moment.
 
+### Optimization
+
+Given a SQL-like query, which provides information in the same order as the Gremlin query's. However, this order may not be the optimal order.
+
+We use `AggregationBlock` to spilt all tableReferences to several parts. In one `AggregationBlock`, we can change the order as long as they obey the input dependency. We spilt a query according to side-effect TVFs (aggregate, store, group, subgraph, tree), global filters (coin, dedup(global), range(global)), global maps (order(global), select), barriers (barrier), modification TVFs (addV, addE, commit, drop, property) and some special TVFs (constant, inject, sample(global)). The reason is the senmatics of these TVFs.
+
+We use `ExecutionOrder` to transfer information to the compilation part. Every `ExecutionOrder.Order` is a list, recording 5 parts' information
+
+1. A `CompileNode` (an abstract  representation of a tableReference) is an `MatchNode`(corresponding to a free node) or `NonFreeTable` (correspongding to a TVF), called "currentNode", which is going to execute
+2. A `CompileLink` (an abstract representation of an edge or a predicate) is an link from previous state to current state. It can be a `MatchEdge` (correspongding to a free edge), or a `PredicateLink` of `WEdgeVertexBridgeExpression` (linking a non-free edge with a free node), called "traversalLink"
+3. A list of `PredicateLink` and `int`, called "forwardLinks", which contains all links between currentNode and previous state, and corresponding priority.
+4. A list of `MatchEdge` and `int`, called "backwardEdges", which contains all edges that need to be retrieved, and corresponding priority.
+5. A list of `ExecutionOrders`, called "localExecutionOrders", which contains all execution orders in this TVFs or Derived tables.
+
+As you can see, `ExecutionOrder` is another representation about the original Gremlin query. We can use these orders to compile and execute directly.
+
+Then how to generate an optimal order? We use [beam search](16) to search most feasible solutions. If we have a perfect cost function to evaluate an order (12/15/2017), then the optimization ican improve the performance markedly.
+
 ### Compilation
 
-After the translation part finishing, GraphView compiles this SQL syntax tree and gets a linked list of GraphViewExecutionOperator. As you know, GraphView just needs the last operator in this list as it needs the head of one linked list. 
+After the optimization part finished, GraphView compiles this `ExecutionOrder` and gets a linked list of `GraphViewExecutionOperator`. Different tableReference compiles to different `GraphViewExecutionOperator`. Every `GraphViewExecutionOperator` records its input operator. That is to say, GraphView just needs the last operator in this list as it needs the head of one linked list. 
 
 ### Execution
 
 For the GraphViewExecutionOperator list, it calls `Next()` until the result is not `null`. Then the execution of this Gremlin query is done.
+
+Briefly spearking, `GraphViewExecutionOperator` are two types of execution. The one calls once `inputOp.next()` and returns once, the other calls multiple times `inputOp.next()` and puts them in a buffer, then returns elements in this buffer. We the latter one "in batch". It depends on the senmatics and efficient.
 
 ## Project file structure
 Now (8/1/2017) we are working on branch [clean-up][9]. Generally, we have two subprojects, `GraphView` and `GraphViewUnitTest` .
@@ -1309,6 +1347,10 @@ Not all filters should be translated to a filter TVF because of poor efficiency.
 
 In translation part, we use a local variable `NeedFilter` to keep information about sideEffect. If current state of FSM is affected by a sideEffect-step, GraphView will assign `true` to it. During translation, if we face a filter-step, such as `and`, `or`, `not`, `is`, `has` and `where`, we must use Filter TVF to make sure the correct order if `NeedFilter` is `true`. `NeedFilter`  is a member variable of `GramlinVariable`, so if the current state(`pivotVariable`) is changed, the `NeedFilter`  will be initialed as `false`.
 
+## License
+
+GraphView is under the MIT license.
+
 [1]: http://tinkerpop.apache.org/docs/current/reference/#match-step
 [2]: https://en.wikipedia.org/wiki/Partially_ordered_set
 [3]: https://en.wikipedia.org/wiki/Topological_sorting
@@ -1324,3 +1366,5 @@ In translation part, we use a local variable `NeedFilter` to keep information ab
 [13]: https://en.wikipedia.org/wiki/Finite-state_machine
 [14]: http://tinkerpop.apache.org/docs/current/reference/#path-step
 [15]: https://docs.microsoft.com/en-us/sql/t-sql/language-elements/case-transact-sql
+[16]: https://en.wikipedia.org/wiki/Beam_search
+[17]: https://docs.microsoft.com/en-us/sql/ssdt/download-sql-server-data-tools-ssdt
